@@ -3,7 +3,7 @@ import logging
 import asyncio
 import threading
 from flask import Flask, request, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -22,11 +22,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment variables
+# Get environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-STORAGE_CHANNEL = int(os.getenv("STORAGE_CHANNEL_ID"))
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Handle STORAGE_CHANNEL_ID - supports both numeric IDs and usernames
+storage_channel_raw = os.getenv("STORAGE_CHANNEL_ID")
+if storage_channel_raw and storage_channel_raw.startswith('@'):
+    STORAGE_CHANNEL = storage_channel_raw  # Public channel username
+    logger.info(f"Storage channel set as username: {STORAGE_CHANNEL}")
+else:
+    try:
+        STORAGE_CHANNEL = int(storage_channel_raw) if storage_channel_raw else None
+        logger.info(f"Storage channel set as numeric ID: {STORAGE_CHANNEL}")
+    except (ValueError, TypeError):
+        STORAGE_CHANNEL = None
+        logger.error(f"Invalid STORAGE_CHANNEL_ID: {storage_channel_raw}")
 
 # Flask app
 app = Flask(__name__)
@@ -148,10 +160,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ You are not authorized to use this bot.")
         return
 
-    # Ensure user in DB
     add_user(user.id, user.username, user.first_name)
-
     stats = get_user_stats(user.id)
+
     if stats:
         total_files, total_size, joined_date = stats
         await update.message.reply_text(
@@ -166,7 +177,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"**Commands:**\n"
             f"/stats - Bot statistics\n"
             f"/mylinks - Your recent files\n"
-            f"/mystats - Your personal stats",
+            f"/mystats - Your personal stats\n"
+            f"/test - Test channel connection",
             disable_web_page_preview=True
         )
     else:
@@ -177,7 +189,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"**Commands:**\n"
             f"/stats - Bot statistics\n"
             f"/mylinks - Your recent files\n"
-            f"/mystats - Your personal stats"
+            f"/mystats - Your personal stats\n"
+            f"/test - Test channel connection"
         )
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -238,13 +251,52 @@ async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No statistics found. Upload a file to get started!")
 
+async def test_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test if bot can post to the storage channel"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if not STORAGE_CHANNEL:
+        await update.message.reply_text("❌ STORAGE_CHANNEL_ID is not configured!")
+        return
+
+    try:
+        await update.message.reply_text(f"📡 Testing channel: {STORAGE_CHANNEL}")
+        
+        # Try to send a test message
+        result = await context.bot.send_message(
+            chat_id=STORAGE_CHANNEL,
+            text=f"✅ Test message from bot at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        
+        await update.message.reply_text(
+            f"✅ **Test successful!**\n\n"
+            f"Channel: {STORAGE_CHANNEL}\n"
+            f"Message ID: {result.message_id}\n\n"
+            f"Bot can post to the channel."
+        )
+        logger.info(f"Test message sent to channel {STORAGE_CHANNEL}")
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Test failed: {error_msg}")
+        await update.message.reply_text(
+            f"❌ **Test failed!**\n\n"
+            f"Error: {error_msg[:200]}\n\n"
+            f"Make sure:\n"
+            f"1. Bot is admin in the channel\n"
+            f"2. Channel ID is correct\n"
+            f"3. Bot has 'Post Messages' permission"
+        )
+
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Unauthorized.")
         return
 
-    # Ensure user in DB (if not already)
+    # Ensure user in DB
     add_user(user.id, user.username, user.first_name)
 
     if not update.message.effective_attachment:
@@ -254,31 +306,46 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing_msg = await update.message.reply_text("📤 Uploading to storage...")
 
     try:
+        # Debug: Log what we're receiving
+        logger.info(f"=== Processing file from admin {user.id} ===")
+        logger.info(f"STORAGE_CHANNEL value: {STORAGE_CHANNEL}")
+        logger.info(f"STORAGE_CHANNEL type: {type(STORAGE_CHANNEL)}")
+
         # Extract file info
         if update.message.document:
             file_name = update.message.document.file_name
             file_size = update.message.document.file_size
             file_id = update.message.document.file_id
+            logger.info(f"Document received: {file_name} ({file_size} bytes)")
         elif update.message.photo:
             file_name = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
             file_size = update.message.photo[-1].file_size
             file_id = update.message.photo[-1].file_id
+            logger.info(f"Photo received: {file_name} ({file_size} bytes)")
         elif update.message.video:
             file_name = update.message.video.file_name or f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
             file_size = update.message.video.file_size
             file_id = update.message.video.file_id
+            logger.info(f"Video received: {file_name} ({file_size} bytes)")
         else:
             file_name = f"file_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             file_size = 0
             file_id = None
+            logger.info(f"Unknown file type received")
 
         # Forward to storage channel without signature
+        logger.info(f"Attempting to forward to: {STORAGE_CHANNEL}")
+        logger.info(f"Source chat_id: {update.message.chat_id}")
+        logger.info(f"Message ID: {update.message.message_id}")
+        
         forwarded = await context.bot.forward_messages(
             chat_id=STORAGE_CHANNEL,
             from_chat_id=update.message.chat_id,
             message_ids=update.message.message_id,
             drop_author=True
         )
+        
+        logger.info(f"Forward result: {forwarded}")
 
         if forwarded:
             if isinstance(forwarded, list):
@@ -286,14 +353,21 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 stored_msg_id = forwarded.message_id
 
-            channel_positive = abs(STORAGE_CHANNEL)
-            link = f"https://t.me/c/{channel_positive}/{stored_msg_id}"
+            logger.info(f"Stored message ID in channel: {stored_msg_id}")
+
+            # Generate link
+            if isinstance(STORAGE_CHANNEL, str) and STORAGE_CHANNEL.startswith('@'):
+                link = f"https://t.me/{STORAGE_CHANNEL.lstrip('@')}/{stored_msg_id}"
+                logger.info(f"Generated username link: {link}")
+            else:
+                channel_positive = abs(int(STORAGE_CHANNEL))
+                link = f"https://t.me/c/{channel_positive}/{stored_msg_id}"
+                logger.info(f"Generated numeric link: {link}")
 
             # Save to database
             update_user_stats(user.id, file_size)
             save_file(user.id, file_id, file_name, file_size, stored_msg_id, link)
 
-            # Update the original processing message with success info
             await processing_msg.edit_text(
                 f"✅ **File stored successfully!**\n\n"
                 f"📄 **Name:** {file_name}\n"
@@ -302,18 +376,22 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔒 No forward signature | 📁 Permanent",
                 disable_web_page_preview=True
             )
-            logger.info(f"Stored {file_name} ({format_size(file_size)}) -> {link}")
+            logger.info(f"Successfully stored {file_name} -> {link}")
         else:
-            await processing_msg.edit_text("❌ Failed to forward file.")
+            logger.error("Forward returned None or empty")
+            await processing_msg.edit_text("❌ Failed to forward file. No response from Telegram.")
+            
     except Exception as e:
-        logger.error(f"Error handling file: {e}")
-        await processing_msg.edit_text(f"❌ Error: {str(e)[:100]}")
+        logger.error(f"Error handling file: {e}", exc_info=True)
+        error_msg = str(e)
+        await processing_msg.edit_text(f"❌ Error: {error_msg[:200]}\n\nCheck logs for details.")
 
 # -------------------- Register Handlers --------------------
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("stats", stats))
 application.add_handler(CommandHandler("mylinks", mylinks))
 application.add_handler(CommandHandler("mystats", mystats))
+application.add_handler(CommandHandler("test", test_channel))
 application.add_handler(MessageHandler(filters.ATTACHMENT, handle_file))
 
 # -------------------- Flask Webhook --------------------
@@ -329,6 +407,7 @@ def index():
 
 # -------------------- Main Entry --------------------
 if __name__ == "__main__":
+    # Initialize database
     init_db()
 
     # Set up asyncio loop
@@ -356,7 +435,7 @@ if __name__ == "__main__":
 
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.start()
-    logger.info("Flask server started in background thread")
+    logger.info("Flask server started on port 5000")
 
     try:
         loop.run_forever()
