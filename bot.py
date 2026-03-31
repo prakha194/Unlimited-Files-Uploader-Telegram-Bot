@@ -38,7 +38,7 @@ else:
 
 app = Flask(__name__)
 BOT_LOOP = None
-BOT_USERNAME = None   # will be set after bot initialisation
+BOT_USERNAME = None
 
 # -------------------- Database Functions --------------------
 def get_db_connection():
@@ -54,7 +54,9 @@ def init_db():
                     first_name TEXT,
                     joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     total_files INTEGER DEFAULT 0,
-                    total_size BIGINT DEFAULT 0
+                    total_size BIGINT DEFAULT 0,
+                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    welcome_sent BOOLEAN DEFAULT FALSE
                 )
             """)
             cur.execute("""
@@ -65,14 +67,15 @@ def init_db():
                     file_name TEXT,
                     file_size BIGINT,
                     message_id INTEGER,
-                    link TEXT,
                     token TEXT UNIQUE,
+                    link TEXT,
                     uploaded_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # Add token column if not exists (for existing tables)
+            # Add missing columns if needed
             try:
-                cur.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS token TEXT UNIQUE")
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_sent BOOLEAN DEFAULT FALSE")
             except:
                 pass
             conn.commit()
@@ -84,9 +87,24 @@ def add_user(user_id, username=None, first_name=None):
             cur.execute("""
                 INSERT INTO users (user_id, username, first_name)
                 VALUES (%s, %s, %s)
-                ON CONFLICT (user_id) DO NOTHING
+                ON CONFLICT (user_id) DO UPDATE
+                SET username = EXCLUDED.username,
+                    first_name = EXCLUDED.first_name
             """, (user_id, username, first_name))
             conn.commit()
+
+def set_welcome_sent(user_id):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET welcome_sent = TRUE WHERE user_id = %s", (user_id,))
+            conn.commit()
+
+def welcome_sent(user_id):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT welcome_sent FROM users WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
+            return row and row[0]
 
 def update_user_stats(user_id, file_size):
     with get_db_connection() as conn:
@@ -102,7 +120,6 @@ def update_user_stats(user_id, file_size):
 def save_file(user_id, file_id, file_name, file_size, message_id, token):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Build the token link (will be shown to user)
             link = f"https://t.me/{BOT_USERNAME}?start={token}" if BOT_USERNAME else ""
             cur.execute("""
                 INSERT INTO files (user_id, file_id, file_name, file_size, message_id, token, link)
@@ -150,6 +167,12 @@ def get_total_storage():
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(SUM(file_size), 0) FROM files")
             return cur.fetchone()[0]
+
+def get_all_users():
+    with get_db_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT user_id, username, first_name, joined_date, total_files, total_size FROM users ORDER BY joined_date DESC")
+            return cur.fetchall()
 
 def format_size(bytes_size):
     if bytes_size < 1024:
@@ -209,13 +232,26 @@ application = Application.builder().token(BOT_TOKEN).updater(None).build()
 
 # -------------------- Handlers --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
     # If there is a token argument, serve the file
     if context.args:
         token = context.args[0]
         file_record = get_file_by_token(token)
         if file_record:
+            # Add user if not admin (or always add, but we already do)
+            add_user(user_id, user.username, user.first_name)
+            # Send welcome message if this is the first time for this user (and not admin)
+            if user_id != ADMIN_ID and not welcome_sent(user_id):
+                await update.message.reply_text(
+                    "👋 Welcome to the File Storage Bot!\n\n"
+                    "You are receiving this file via a shared link.\n"
+                    "Only the admin can upload files, but you can download any shared files using these links.\n\n"
+                    "🔗 Use the link you received to access files."
+                )
+                set_welcome_sent(user_id)
+            # Send the file
             try:
-                # Copy the file from the storage channel to the user
                 await context.bot.copy_message(
                     chat_id=update.effective_chat.id,
                     from_chat_id=STORAGE_CHANNEL,
@@ -229,9 +265,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # Normal start command (no token)
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ You are not authorized to use this bot.")
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ This bot is private and only the admin can use it.")
         return
 
     add_user(user.id, user.username, user.first_name)
@@ -249,8 +284,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📤 Send me any text, file, photo, video, audio, or voice message.\n"
             f"🔒 It will be copied to storage without forward signature.\n"
             f"🔗 You'll receive a private link (token) that anyone can use.\n\n"
-            f"Commands:\n"
+            f"**Admin Commands:**\n"
             f"/stats - Bot statistics\n"
+            f"/users - List all users\n"
+            f"/broadcast - Send a message to all users (reply to a message)\n"
             f"/mylinks - Your recent files\n"
             f"/mystats - Your personal stats\n"
             f"/test - Test channel connection",
@@ -261,8 +298,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Admin Panel\n\n"
             f"Welcome, {user.first_name}!\n\n"
             f"Send me a message or file to get started.\n\n"
-            f"Commands:\n"
+            f"**Admin Commands:**\n"
             f"/stats - Bot statistics\n"
+            f"/users - List all users\n"
+            f"/broadcast - Send a message to all users (reply to a message)\n"
             f"/mylinks - Your recent files\n"
             f"/mystats - Your personal stats\n"
             f"/test - Test channel connection"
@@ -281,6 +320,67 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💾 Total storage: {format_size(total_storage)}",
         disable_web_page_preview=True
     )
+
+async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    all_users = get_all_users()
+    if not all_users:
+        await update.message.reply_text("No users found.")
+        return
+
+    message = "👥 **User List**\n\n"
+    for u in all_users:
+        user_id = u["user_id"]
+        username = u["username"] or "N/A"
+        first_name = u["first_name"] or "N/A"
+        joined = u["joined_date"].strftime("%Y-%m-%d")
+        files = u["total_files"]
+        storage = format_size(u["total_size"])
+        message += f"**ID:** {user_id}\n"
+        message += f"**Name:** {first_name} (@{username})\n"
+        message += f"**Joined:** {joined} | **Files:** {files} | **Storage:** {storage}\n\n"
+
+    await update.message.reply_text(message, disable_web_page_preview=True)
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    # Must be a reply to a message
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Please reply to a message with /broadcast to send it to all users.")
+        return
+
+    broadcast_msg = update.message.reply_to_message
+    all_users = get_all_users()
+    if not all_users:
+        await update.message.reply_text("No users to broadcast to.")
+        return
+
+    status_msg = await update.message.reply_text(f"📤 Broadcasting to {len(all_users)} users...")
+
+    success = 0
+    fail = 0
+    for u in all_users:
+        uid = u["user_id"]
+        try:
+            # Copy the exact message (with forward metadata if any)
+            await broadcast_msg.copy(
+                chat_id=uid,
+                caption=broadcast_msg.caption,
+                reply_markup=broadcast_msg.reply_markup
+            )
+            success += 1
+        except Exception as e:
+            logger.error(f"Failed to broadcast to {uid}: {e}")
+            fail += 1
+        await asyncio.sleep(0.05)  # rate limit
+
+    await status_msg.edit_text(f"✅ Broadcast completed!\n\n📤 Sent to: {success}\n❌ Failed: {fail}")
 
 async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -356,6 +456,7 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not msg:
         return
 
+    # Only admin can upload files
     if user.id != ADMIN_ID:
         await msg.reply_text("⛔ Unauthorized.")
         return
@@ -380,8 +481,7 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id, file_name, file_size = extract_message_meta(msg)
 
         # Generate a unique token for this file
-        token = secrets.token_urlsafe(8)   # e.g., "8xK9pQ2r"
-        # Save file record (save_file will build the link using BOT_USERNAME)
+        token = secrets.token_urlsafe(8)
         link = save_file(user.id, file_id, file_name, file_size, stored_msg_id, token)
 
         update_user_stats(user.id, file_size)
@@ -404,6 +504,8 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------- Register Handlers --------------------
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("stats", stats))
+application.add_handler(CommandHandler("users", users))
+application.add_handler(CommandHandler("broadcast", broadcast))
 application.add_handler(CommandHandler("mylinks", mylinks))
 application.add_handler(CommandHandler("mystats", mystats))
 application.add_handler(CommandHandler("test", test_channel))
@@ -443,7 +545,6 @@ if __name__ == "__main__":
         global BOT_USERNAME
         await application.initialize()
         await application.start()
-        # Get bot username
         me = await application.bot.get_me()
         BOT_USERNAME = me.username
         logger.info("Bot username: @%s", BOT_USERNAME)
