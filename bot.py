@@ -531,9 +531,13 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not msg:
         return
 
-    # Skip if admin is in broadcast mode
-    if awaiting_broadcast.get(user.id):
-        return
+   # Skip if broadcast already handled
+if getattr(update, "_handled", False):
+    return
+
+# Skip if admin is in broadcast mode
+if awaiting_broadcast.get(user.id):
+    return
 
     # Only admin can upload files via private chat
     if user.id != ADMIN_ID:
