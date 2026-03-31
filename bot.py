@@ -527,14 +527,15 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not msg:
         return
 
-    # Skip if broadcast message (prevent upload during broadcast)
-if user.id == ADMIN_ID and not context.user_data.get("allow_upload", True):
-    return
     # Only admin can upload files via private chat
     if user.id != ADMIN_ID:
         await msg.reply_text("⛔ Unauthorized.")
         return
 
+    # Skip if broadcast mode is active
+    if awaiting_broadcast.get(user.id):
+        return
+            
     add_user(user.id, user.username, user.first_name)
 
     if not STORAGE_CHANNEL:
