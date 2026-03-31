@@ -126,7 +126,7 @@ telegram-storage-bot/
 ├── README.md          # Documentation
 └── .env               # Environment variables (not committed)
 
-env.example-
+env.example
 ```env
 BOT_TOKEN=your_bot_token_here
 ADMIN_ID=123456789
