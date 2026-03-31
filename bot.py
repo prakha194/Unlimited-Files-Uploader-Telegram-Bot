@@ -584,11 +584,17 @@ application.add_handler(CommandHandler("test", test_channel))
 # Channel post handler – watches the storage channel
 application.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.ATTACHMENT, handle_channel_post))
 
-# Broadcast message handler – catches the message after /broadcast
-application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_broadcast_message))
+# Broadcast handler (priority 0)
+application.add_handler(
+    MessageHandler(filters.ALL & ~filters.COMMAND, handle_broadcast_message),
+    group=0
+)
 
-# Main private chat handler – handles file uploads (admin only)
-application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_incoming))
+# Upload handler (priority 1)
+application.add_handler(
+    MessageHandler(filters.ALL & ~filters.COMMAND, handle_incoming),
+    group=1
+)
 
 # -------------------- Flask Webhook --------------------
 @app.route("/webhook", methods=["POST"])
