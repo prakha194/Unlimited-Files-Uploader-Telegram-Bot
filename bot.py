@@ -188,6 +188,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     add_user(user_id, user.username, user.first_name)
 
+    # Admin bypass
+    if user_id == ADMIN_ID:
+        stats = get_user_stats(user_id)
+        if stats:
+            total_files, total_size, joined_date = stats
+            await update.message.reply_text(
+                f"👑 **Admin Panel**\n\n"
+                f"✅ **Welcome back, {user.first_name}!**\n\n"
+                f"📊 **Your Stats:**\n"
+                f"• Files uploaded: {total_files}\n"
+                f"• Storage used: {format_size(total_size)}\n"
+                f"• Member since: {joined_date.strftime('%Y-%m-%d')}\n\n"
+                f"📤 **Send me any file** (up to 2GB) and I'll give you a permanent download link.\n\n"
+                f"🔗 Links never expire and have no forward signatures.\n\n"
+                f"Use /mylinks to see your uploaded files.\n\n"
+                f"**Admin Commands:**\n"
+                f"/stats - Bot statistics\n"
+                f"/users - List all users\n"
+                f"/broadcast - Send message to all users",
+                disable_web_page_preview=True
+            )
+        return
+
+    # Regular user flow
     if await is_member(user_id):
         stats = get_user_stats(user_id)
         if stats:
@@ -226,6 +250,15 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
 
+    # Admin bypass
+    if user_id == ADMIN_ID:
+        await query.edit_message_text(
+            "✅ **You are the admin!**\n\n"
+            "You have full access without joining the channel.\n"
+            "Use /start to see your stats."
+        )
+        return
+
     if await is_member(user_id):
         await query.edit_message_text(
             "✅ **Verification successful!**\n\n"
@@ -247,7 +280,8 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    if not await is_member(user_id):
+    # Admin bypass
+    if user_id != ADMIN_ID and not await is_member(user_id):
         await update.message.reply_text(
             "⚠️ **Access Denied**\n\n"
             f"You must join @{REQUIRED_CHANNEL.lstrip('@')} first.\n"
@@ -280,7 +314,8 @@ async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    if not await is_member(user_id):
+    # Admin bypass
+    if user_id != ADMIN_ID and not await is_member(user_id):
         await update.message.reply_text(
             "⚠️ **Access Denied**\n\n"
             f"You must join @{REQUIRED_CHANNEL.lstrip('@')} first."
@@ -306,7 +341,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
 
-    if not await is_member(user_id):
+    # Admin bypass
+    if user_id != ADMIN_ID and not await is_member(user_id):
         await update.message.reply_text(
             "⚠️ **Access Denied**\n\n"
             f"You must join @{REQUIRED_CHANNEL.lstrip('@')} first.\n"
