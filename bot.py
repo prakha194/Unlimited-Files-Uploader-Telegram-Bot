@@ -172,7 +172,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Files uploaded: {total_files}\n"
             f"• Storage used: {format_size(total_size)}\n"
             f"• Member since: {joined_date.strftime('%Y-%m-%d')}\n\n"
-            f"📤 **Send me any file** (up to 2GB) and I'll store it.\n"
+            f"📤 **Send or forward me any file** (up to 2GB) and I'll store it.\n"
             f"🔗 Links never expire and have no forward signatures.\n\n"
             f"**Commands:**\n"
             f"/stats - Bot statistics\n"
@@ -185,7 +185,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ **Admin Panel**\n\n"
             f"Welcome, {user.first_name}!\n\n"
-            f"Send me a file to get started.\n\n"
+            f"Send or forward me a file to get started.\n\n"
             f"**Commands:**\n"
             f"/stats - Bot statistics\n"
             f"/mylinks - Your recent files\n"
@@ -299,60 +299,70 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Ensure user in DB
     add_user(user.id, user.username, user.first_name)
 
-    if not update.message.effective_attachment:
-        await update.message.reply_text("Please send a file (photo, video, document, etc.)")
+    # Check if there's a file (either directly sent or forwarded)
+    message = update.message
+    
+    # Get the actual file message (if forwarded, use the original)
+    file_message = message
+    if message.forward_origin:
+        # This is a forwarded message, we need to get the original
+        # For forwarded messages, the media is still in message
+        logger.info("Processing forwarded message")
+    
+    if not file_message.effective_attachment:
+        await update.message.reply_text("Please send or forward a file (photo, video, document, etc.)")
         return
 
     processing_msg = await update.message.reply_text("📤 Uploading to storage...")
 
     try:
-        # Debug: Log what we're receiving
+        # Debug logging
         logger.info(f"=== Processing file from admin {user.id} ===")
         logger.info(f"STORAGE_CHANNEL value: {STORAGE_CHANNEL}")
-        logger.info(f"STORAGE_CHANNEL type: {type(STORAGE_CHANNEL)}")
+        logger.info(f"Message has attachment: {bool(file_message.effective_attachment)}")
 
         # Extract file info
-        if update.message.document:
-            file_name = update.message.document.file_name
-            file_size = update.message.document.file_size
-            file_id = update.message.document.file_id
-            logger.info(f"Document received: {file_name} ({file_size} bytes)")
-        elif update.message.photo:
+        if file_message.document:
+            file_name = file_message.document.file_name
+            file_size = file_message.document.file_size
+            file_id = file_message.document.file_id
+            logger.info(f"Document: {file_name} ({file_size} bytes)")
+        elif file_message.photo:
             file_name = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-            file_size = update.message.photo[-1].file_size
-            file_id = update.message.photo[-1].file_id
-            logger.info(f"Photo received: {file_name} ({file_size} bytes)")
-        elif update.message.video:
-            file_name = update.message.video.file_name or f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-            file_size = update.message.video.file_size
-            file_id = update.message.video.file_id
-            logger.info(f"Video received: {file_name} ({file_size} bytes)")
+            file_size = file_message.photo[-1].file_size
+            file_id = file_message.photo[-1].file_id
+            logger.info(f"Photo: {file_name} ({file_size} bytes)")
+        elif file_message.video:
+            file_name = file_message.video.file_name or f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+            file_size = file_message.video.file_size
+            file_id = file_message.video.file_id
+            logger.info(f"Video: {file_name} ({file_size} bytes)")
+        elif file_message.audio:
+            file_name = file_message.audio.file_name or f"audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
+            file_size = file_message.audio.file_size
+            file_id = file_message.audio.file_id
+            logger.info(f"Audio: {file_name} ({file_size} bytes)")
         else:
             file_name = f"file_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             file_size = 0
             file_id = None
-            logger.info(f"Unknown file type received")
+            logger.info(f"Unknown file type")
 
-        # Forward to storage channel without signature
-        logger.info(f"Attempting to forward to: {STORAGE_CHANNEL}")
-        logger.info(f"Source chat_id: {update.message.chat_id}")
-        logger.info(f"Message ID: {update.message.message_id}")
+        # Forward to storage channel WITHOUT signature
+        # Use copy_message instead of forward to completely remove signature
+        logger.info(f"Attempting to copy to: {STORAGE_CHANNEL}")
         
-        forwarded = await context.bot.forward_messages(
+        # Use copy_message which doesn't show "Forwarded from" at all
+        copied = await context.bot.copy_message(
             chat_id=STORAGE_CHANNEL,
-            from_chat_id=update.message.chat_id,
-            message_ids=update.message.message_id,
-            drop_author=True
+            from_chat_id=file_message.chat_id,
+            message_id=file_message.message_id
         )
         
-        logger.info(f"Forward result: {forwarded}")
+        logger.info(f"Copy result: {copied}")
 
-        if forwarded:
-            if isinstance(forwarded, list):
-                stored_msg_id = forwarded[0].message_id
-            else:
-                stored_msg_id = forwarded.message_id
-
+        if copied:
+            stored_msg_id = copied.message_id
             logger.info(f"Stored message ID in channel: {stored_msg_id}")
 
             # Generate link
@@ -378,8 +388,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             logger.info(f"Successfully stored {file_name} -> {link}")
         else:
-            logger.error("Forward returned None or empty")
-            await processing_msg.edit_text("❌ Failed to forward file. No response from Telegram.")
+            logger.error("Copy returned None")
+            await processing_msg.edit_text("❌ Failed to store file. No response from Telegram.")
             
     except Exception as e:
         logger.error(f"Error handling file: {e}", exc_info=True)
@@ -431,7 +441,7 @@ if __name__ == "__main__":
     # Run Flask in a separate thread
     def run_flask():
         port = int(os.environ.get("PORT", 5000))
-        app.run(host="0.0.0.0", port=port)
+        app.run(host="0.0.0.0", port=port, threaded=True)
 
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.start()
