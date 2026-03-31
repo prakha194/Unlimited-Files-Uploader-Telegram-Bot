@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import threading
+import secrets
 from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import (
@@ -36,9 +37,8 @@ else:
         STORAGE_CHANNEL = None
 
 app = Flask(__name__)
-
-# This is the bot's main asyncio loop.
 BOT_LOOP = None
+BOT_USERNAME = None   # will be set after bot initialisation
 
 # -------------------- Database Functions --------------------
 def get_db_connection():
@@ -66,10 +66,17 @@ def init_db():
                     file_size BIGINT,
                     message_id INTEGER,
                     link TEXT,
+                    token TEXT UNIQUE,
                     uploaded_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # Add token column if not exists (for existing tables)
+            try:
+                cur.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS token TEXT UNIQUE")
+            except:
+                pass
             conn.commit()
+    logger.info("Database initialized")
 
 def add_user(user_id, username=None, first_name=None):
     with get_db_connection() as conn:
@@ -92,14 +99,23 @@ def update_user_stats(user_id, file_size):
             """, (file_size, user_id))
             conn.commit()
 
-def save_file(user_id, file_id, file_name, file_size, message_id, link):
+def save_file(user_id, file_id, file_name, file_size, message_id, token):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Build the token link (will be shown to user)
+            link = f"https://t.me/{BOT_USERNAME}?start={token}" if BOT_USERNAME else ""
             cur.execute("""
-                INSERT INTO files (user_id, file_id, file_name, file_size, message_id, link)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (user_id, file_id, file_name, file_size, message_id, link))
+                INSERT INTO files (user_id, file_id, file_name, file_size, message_id, token, link)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (user_id, file_id, file_name, file_size, message_id, token, link))
             conn.commit()
+            return link
+
+def get_file_by_token(token):
+    with get_db_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM files WHERE token = %s", (token,))
+            return cur.fetchone()
 
 def get_user_files(user_id, limit=10):
     with get_db_connection() as conn:
@@ -151,35 +167,30 @@ def extract_message_meta(msg):
             msg.document.file_name or "document",
             msg.document.file_size or 0
         )
-
     if msg.photo:
         return (
             msg.photo[-1].file_id,
             f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg",
             msg.photo[-1].file_size or 0
         )
-
     if msg.video:
         return (
             msg.video.file_id,
             msg.video.file_name or f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4",
             msg.video.file_size or 0
         )
-
     if msg.audio:
         return (
             msg.audio.file_id,
             msg.audio.file_name or f"audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3",
             msg.audio.file_size or 0
         )
-
     if msg.voice:
         return (
             msg.voice.file_id,
             f"voice_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ogg",
             msg.voice.file_size or 0
         )
-
     if msg.text:
         text_bytes = len(msg.text.encode("utf-8"))
         return (
@@ -187,32 +198,37 @@ def extract_message_meta(msg):
             f"text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
             text_bytes
         )
-
     return (
         None,
         f"message_{datetime.now().strftime('%Y%m%d_%H%M%S')}.dat",
         0
     )
 
-def build_storage_link(channel, message_id):
-    # Public channel: https://t.me/username/123
-    if isinstance(channel, str) and channel.startswith("@"):
-        return f"https://t.me/{channel.lstrip('@')}/{message_id}"
-
-    # Private channel/supergroup links use the internal ID without -100
-    channel_id = str(channel)
-    if channel_id.startswith("-100"):
-        channel_id = channel_id[4:]
-    elif channel_id.startswith("-"):
-        channel_id = channel_id[1:]
-
-    return f"https://t.me/c/{channel_id}/{message_id}"
-
 # -------------------- Application --------------------
 application = Application.builder().token(BOT_TOKEN).updater(None).build()
 
 # -------------------- Handlers --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # If there is a token argument, serve the file
+    if context.args:
+        token = context.args[0]
+        file_record = get_file_by_token(token)
+        if file_record:
+            try:
+                # Copy the file from the storage channel to the user
+                await context.bot.copy_message(
+                    chat_id=update.effective_chat.id,
+                    from_chat_id=STORAGE_CHANNEL,
+                    message_id=file_record["message_id"]
+                )
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error retrieving file: {e}")
+            return
+        else:
+            await update.message.reply_text("❌ Invalid or expired link.")
+            return
+
+    # Normal start command (no token)
     user = update.effective_user
     if user.id != ADMIN_ID:
         await update.message.reply_text("⛔ You are not authorized to use this bot.")
@@ -231,7 +247,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Storage used: {format_size(total_size)}\n"
             f"• Member since: {joined_date.strftime('%Y-%m-%d')}\n\n"
             f"📤 Send me any text, file, photo, video, audio, or voice message.\n"
-            f"🔒 It will be copied to storage without forward signature.\n\n"
+            f"🔒 It will be copied to storage without forward signature.\n"
+            f"🔗 You'll receive a private link (token) that anyone can use.\n\n"
             f"Commands:\n"
             f"/stats - Bot statistics\n"
             f"/mylinks - Your recent files\n"
@@ -352,6 +369,7 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing_msg = await msg.reply_text("📤 Uploading to storage...")
 
     try:
+        # Copy to storage channel
         copied = await context.bot.copy_message(
             chat_id=STORAGE_CHANNEL,
             from_chat_id=msg.chat_id,
@@ -360,21 +378,24 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         stored_msg_id = copied.message_id
         file_id, file_name, file_size = extract_message_meta(msg)
-        link = build_storage_link(STORAGE_CHANNEL, stored_msg_id)
+
+        # Generate a unique token for this file
+        token = secrets.token_urlsafe(8)   # e.g., "8xK9pQ2r"
+        # Save file record (save_file will build the link using BOT_USERNAME)
+        link = save_file(user.id, file_id, file_name, file_size, stored_msg_id, token)
 
         update_user_stats(user.id, file_size)
-        save_file(user.id, file_id, file_name, file_size, stored_msg_id, link)
 
         await processing_msg.edit_text(
             f"✅ File stored successfully!\n\n"
             f"📄 Name: {file_name}\n"
             f"💾 Size: {format_size(file_size)}\n"
             f"🔗 Link: {link}\n\n"
-            f"🔒 No forward signature | 📁 Permanent",
+            f"🔒 Anyone with this link can download it.",
             disable_web_page_preview=True
         )
 
-        logger.info("Stored message %s from user %s", stored_msg_id, user.id)
+        logger.info("Stored message %s with token %s", stored_msg_id, token)
 
     except Exception as e:
         logger.exception("Error handling incoming message")
@@ -387,7 +408,6 @@ application.add_handler(CommandHandler("mylinks", mylinks))
 application.add_handler(CommandHandler("mystats", mystats))
 application.add_handler(CommandHandler("test", test_channel))
 
-# This catches text + media + forwarded messages, but skips commands.
 application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_incoming))
 
 # -------------------- Flask Webhook --------------------
@@ -420,8 +440,13 @@ if __name__ == "__main__":
     asyncio.set_event_loop(BOT_LOOP)
 
     async def setup():
+        global BOT_USERNAME
         await application.initialize()
         await application.start()
+        # Get bot username
+        me = await application.bot.get_me()
+        BOT_USERNAME = me.username
+        logger.info("Bot username: @%s", BOT_USERNAME)
 
         render_url = os.getenv("RENDER_EXTERNAL_URL")
         if render_url:
