@@ -378,9 +378,11 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
         return
 
     if awaiting_broadcast.get(user.id):
+    context.user_data["allow_upload"] = False
         del awaiting_broadcast[user.id]
         msg = update.effective_message
-
+        context.user_data["allow_upload"] = True
+        
         all_users = get_all_users()
         if not all_users:
             await msg.reply_text("No users to broadcast to.")
@@ -522,10 +524,9 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not msg:
         return
 
-    # Skip if admin is in broadcast mode
-    if awaiting_broadcast.get(user.id):
-        return
-
+    # Skip if broadcast message (prevent upload during broadcast)
+if user.id == ADMIN_ID and not context.user_data.get("allow_upload", True):
+    return
     # Only admin can upload files via private chat
     if user.id != ADMIN_ID:
         await msg.reply_text("⛔ Unauthorized.")
