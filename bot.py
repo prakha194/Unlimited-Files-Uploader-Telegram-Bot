@@ -414,8 +414,7 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
         f"❌ Failed: {fail}"
     )
 
-    raise ApplicationHandlerStop
-    
+    raise ApplicationHandlerStop    
 async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
