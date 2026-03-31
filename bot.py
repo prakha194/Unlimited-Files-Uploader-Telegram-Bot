@@ -10,7 +10,8 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     filters,
-    ContextTypes
+    ContextTypes,
+    ApplicationHandlerStop
 )
 import psycopg
 from psycopg.rows import dict_row
