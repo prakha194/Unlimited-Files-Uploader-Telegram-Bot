@@ -396,8 +396,12 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
         for u in all_users:
             uid = u["user_id"]
             try:
-                # Copy the message exactly (preserves forward signatures)
-                await msg.copy(chat_id=uid)
+                # Use forward_message to preserve any forward signature
+                await context.bot.forward_message(
+                    chat_id=uid,
+                    from_chat_id=msg.chat_id,
+                    message_id=msg.message_id
+                )
                 success += 1
             except Exception as e:
                 logger.error(f"Failed to broadcast to {uid}: {e}")
