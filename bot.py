@@ -381,8 +381,7 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
     context.user_data["allow_upload"] = False
         del awaiting_broadcast[user.id]
         msg = update.effective_message
-        context.user_data["allow_upload"] = True
-        
+                
         all_users = get_all_users()
         if not all_users:
             await msg.reply_text("No users to broadcast to.")
@@ -411,6 +410,8 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
             f"📤 Sent to: {success}\n"
             f"❌ Failed: {fail}"
         )
+        
+        context.user_data["allow_upload"] = True
 
 async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
