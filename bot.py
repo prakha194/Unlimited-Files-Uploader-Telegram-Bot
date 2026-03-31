@@ -11,9 +11,9 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes
 )
-import psycopg2
-from psycopg2.extras import DictCursor
-from datetime import datetime, timedelta
+import psycopg
+from psycopg.rows import dict_row
+from datetime import datetime
 import json
 
 # Configure logging
@@ -35,7 +35,8 @@ app = Flask(__name__)
 
 # -------------------- Database Setup --------------------
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    """Return a new database connection."""
+    return psycopg.connect(DATABASE_URL)
 
 def init_db():
     with get_db_connection() as conn:
@@ -55,14 +56,13 @@ def init_db():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS files (
                     id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
+                    user_id BIGINT REFERENCES users(user_id),
                     file_id TEXT,
                     file_name TEXT,
                     file_size BIGINT,
                     message_id INTEGER,
                     link TEXT,
-                    uploaded_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    uploaded_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             conn.commit()
@@ -100,7 +100,7 @@ def save_file(user_id, file_id, file_name, file_size, message_id, link):
 
 def get_user_files(user_id, limit=10):
     with get_db_connection() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
                 SELECT file_name, file_size, link, uploaded_date
                 FROM files 
@@ -118,7 +118,8 @@ def get_user_stats(user_id):
                 FROM users 
                 WHERE user_id = %s
             """, (user_id,))
-            return cur.fetchone()
+            row = cur.fetchone()
+            return row if row else None
 
 def get_all_users_count():
     with get_db_connection() as conn:
@@ -150,13 +151,19 @@ def get_today_stats():
 
 def get_all_users_detailed():
     with get_db_connection() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
                 SELECT user_id, username, first_name, total_files, total_size, joined_date
                 FROM users 
                 ORDER BY joined_date DESC
             """)
             return cur.fetchall()
+
+def get_all_users():
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id FROM users")
+            return [row[0] for row in cur.fetchall()]
 
 def format_size(bytes_size):
     """Convert bytes to human readable format"""
@@ -232,6 +239,9 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
 
     if await is_member(user_id):
+        # Mark as verified by setting joined status (we don't have a joined column; we rely on is_member check)
+        # But we can store a flag? The current schema doesn't have a 'joined' column. 
+        # Actually we don't need it; we just check membership each time. So we can just proceed.
         await query.edit_message_text(
             "✅ **Verification successful!**\n\n"
             "Now you can send me any file (up to 2GB) and I'll give you a permanent download link.\n\n"
@@ -270,7 +280,11 @@ async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     message = "📁 **Your Recent Files (Last 10):**\n\n"
-    for i, (file_name, file_size, link, uploaded_date) in enumerate(files, 1):
+    for i, file in enumerate(files, 1):
+        file_name = file['file_name']
+        file_size = file['file_size']
+        link = file['link']
+        uploaded_date = file['uploaded_date']
         message += f"{i}. 📄 {file_name[:30]}\n"
         message += f"   💾 Size: {format_size(file_size)}\n"
         message += f"   🔗 [Download Link]({link})\n"
@@ -416,11 +430,11 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     message = "👥 **User List**\n\n"
-    for user_id, username, first_name, total_files, total_size, joined_date in users[:20]:  # Limit to 20
-        message += f"**ID:** {user_id}\n"
-        message += f"**Name:** {first_name or 'N/A'} (@{username or 'N/A'})\n"
-        message += f"**Files:** {total_files} | **Storage:** {format_size(total_size)}\n"
-        message += f"**Joined:** {joined_date.strftime('%Y-%m-%d')}\n\n"
+    for user in users[:20]:  # Limit to 20
+        message += f"**ID:** {user['user_id']}\n"
+        message += f"**Name:** {user['first_name'] or 'N/A'} (@{user['username'] or 'N/A'})\n"
+        message += f"**Files:** {user['total_files']} | **Storage:** {format_size(user['total_size'])}\n"
+        message += f"**Joined:** {user['joined_date'].strftime('%Y-%m-%d')}\n\n"
     
     if len(users) > 20:
         message += f"\n*Showing first 20 of {len(users)} users*"
