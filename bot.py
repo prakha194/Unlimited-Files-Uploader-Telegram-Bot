@@ -377,42 +377,44 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
     if user.id != ADMIN_ID:
         return
 
-    if awaiting_broadcast.get(user.id):
-    context.user_data["allow_upload"] = False
-        del awaiting_broadcast[user.id]
-        msg = update.effective_message
-                
-        all_users = get_all_users()
-        if not all_users:
-            await msg.reply_text("No users to broadcast to.")
-            return
+    if not awaiting_broadcast.get(user.id):
+        return
 
-        status_msg = await msg.reply_text(f"📤 Broadcasting to {len(all_users)} users...")
-        success = 0
-        fail = 0
+    awaiting_broadcast.pop(user.id, None)
+    msg = update.effective_message
 
-        for u in all_users:
-            uid = u["user_id"]
-            try:
-                await context.bot.forward_message(
-                    chat_id=uid,
-                    from_chat_id=msg.chat_id,
-                    message_id=msg.message_id
-                )
-                success += 1
-            except Exception as e:
-                logger.error(f"Failed to broadcast to {uid}: {e}")
-                fail += 1
-            await asyncio.sleep(0.05)
+    all_users = get_all_users()
+    if not all_users:
+        await msg.reply_text("No users to broadcast to.")
+        raise ApplicationHandlerStop
 
-        await status_msg.edit_text(
-            f"✅ Broadcast completed!\n\n"
-            f"📤 Sent to: {success}\n"
-            f"❌ Failed: {fail}"
-        )
-        
-        context.user_data["allow_upload"] = True
+    status_msg = await msg.reply_text(f"📤 Broadcasting to {len(all_users)} users...")
+    success = 0
+    fail = 0
 
+    for u in all_users:
+        uid = u["user_id"]
+        try:
+            await context.bot.forward_message(
+                chat_id=uid,
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id
+            )
+            success += 1
+        except Exception as e:
+            logger.error(f"Failed to broadcast to {uid}: {e}")
+            fail += 1
+
+        await asyncio.sleep(0.05)
+
+    await status_msg.edit_text(
+        f"✅ Broadcast completed!\n\n"
+        f"📤 Sent to: {success}\n"
+        f"❌ Failed: {fail}"
+    )
+
+    raise ApplicationHandlerStop
+    
 async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
