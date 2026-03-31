@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import threading
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -14,9 +15,8 @@ from telegram.ext import (
 import psycopg
 from psycopg.rows import dict_row
 from datetime import datetime
-import json
 
-# Configure logging
+# -------------------- Configuration --------------------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -33,15 +33,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # Flask app
 app = Flask(__name__)
 
-# -------------------- Database Setup --------------------
+# -------------------- Database Functions --------------------
 def get_db_connection():
-    """Return a new database connection."""
     return psycopg.connect(DATABASE_URL)
 
 def init_db():
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Users table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -52,7 +50,6 @@ def init_db():
                     total_size BIGINT DEFAULT 0
                 )
             """)
-            # Files table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS files (
                     id SERIAL PRIMARY KEY,
@@ -166,7 +163,6 @@ def get_all_users():
             return [row[0] for row in cur.fetchall()]
 
 def format_size(bytes_size):
-    """Convert bytes to human readable format"""
     if bytes_size < 1024:
         return f"{bytes_size} B"
     elif bytes_size < 1024 * 1024:
@@ -175,12 +171,6 @@ def format_size(bytes_size):
         return f"{bytes_size / (1024 * 1024):.2f} MB"
     else:
         return f"{bytes_size / (1024 * 1024 * 1024):.2f} GB"
-
-# Initialize database
-init_db()
-
-# Create Application WITHOUT an Updater (for webhooks)
-application = Application.builder().token(BOT_TOKEN).updater(None).build()
 
 # -------------------- Helper Functions --------------------
 async def is_member(user_id):
@@ -196,8 +186,6 @@ async def is_member(user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
-    
-    # Add user to database
     add_user(user_id, user.username, user.first_name)
 
     if await is_member(user_id):
@@ -239,9 +227,6 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
 
     if await is_member(user_id):
-        # Mark as verified by setting joined status (we don't have a joined column; we rely on is_member check)
-        # But we can store a flag? The current schema doesn't have a 'joined' column. 
-        # Actually we don't need it; we just check membership each time. So we can just proceed.
         await query.edit_message_text(
             "✅ **Verification successful!**\n\n"
             "Now you can send me any file (up to 2GB) and I'll give you a permanent download link.\n\n"
@@ -261,7 +246,7 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
+
     if not await is_member(user_id):
         await update.message.reply_text(
             "⚠️ **Access Denied**\n\n"
@@ -269,16 +254,16 @@ async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Use /start to verify."
         )
         return
-    
+
     files = get_user_files(user_id, limit=10)
-    
+
     if not files:
         await update.message.reply_text(
             "📭 **No files found**\n\n"
             "You haven't uploaded any files yet. Send me a file to get started!"
         )
         return
-    
+
     message = "📁 **Your Recent Files (Last 10):**\n\n"
     for i, file in enumerate(files, 1):
         file_name = file['file_name']
@@ -289,19 +274,19 @@ async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"   💾 Size: {format_size(file_size)}\n"
         message += f"   🔗 [Download Link]({link})\n"
         message += f"   📅 {uploaded_date.strftime('%Y-%m-%d %H:%M')}\n\n"
-    
+
     await update.message.reply_text(message, disable_web_page_preview=True)
 
 async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
+
     if not await is_member(user_id):
         await update.message.reply_text(
             "⚠️ **Access Denied**\n\n"
             f"You must join @{REQUIRED_CHANNEL.lstrip('@')} first."
         )
         return
-    
+
     stats = get_user_stats(user_id)
     if stats:
         total_files, total_size, joined_date = stats
@@ -339,7 +324,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing_msg = await update.message.reply_text("📤 Uploading to storage...")
 
     try:
-        # Get file info
         if update.message.document:
             file_name = update.message.document.file_name
             file_size = update.message.document.file_size
@@ -357,7 +341,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_size = 0
             file_id = None
 
-        # Forward to storage channel without signature
         forwarded = await context.bot.forward_messages(
             chat_id=STORAGE_CHANNEL,
             from_chat_id=update.message.chat_id,
@@ -374,7 +357,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             channel_positive = abs(STORAGE_CHANNEL)
             link = f"https://t.me/c/{channel_positive}/{stored_msg_id}"
 
-            # Save to database
             update_user_stats(user_id, file_size)
             save_file(user_id, file_id, file_name, file_size, stored_msg_id, link)
 
@@ -403,7 +385,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_files = get_total_files()
     total_storage = get_total_storage()
     today_files, today_size = get_today_stats()
-    
+
     await update.message.reply_text(
         f"📊 **Bot Statistics**\n\n"
         f"👥 **Total Users:** {total_users}\n"
@@ -424,21 +406,21 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     users = get_all_users_detailed()
-    
+
     if not users:
         await update.message.reply_text("No users in database.")
         return
 
     message = "👥 **User List**\n\n"
-    for user in users[:20]:  # Limit to 20
+    for user in users[:20]:
         message += f"**ID:** {user['user_id']}\n"
         message += f"**Name:** {user['first_name'] or 'N/A'} (@{user['username'] or 'N/A'})\n"
         message += f"**Files:** {user['total_files']} | **Storage:** {format_size(user['total_size'])}\n"
         message += f"**Joined:** {user['joined_date'].strftime('%Y-%m-%d')}\n\n"
-    
+
     if len(users) > 20:
         message += f"\n*Showing first 20 of {len(users)} users*"
-    
+
     await update.message.reply_text(message, disable_web_page_preview=True)
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -452,16 +434,16 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     broadcast_msg = update.message.reply_to_message
     users = get_all_users()
-    
+
     if not users:
         await update.message.reply_text("No users in database.")
         return
 
     status_msg = await update.message.reply_text(f"📤 Broadcasting to {len(users)} users...")
-    
+
     success = 0
     fail = 0
-    
+
     for uid in users:
         try:
             if broadcast_msg.text:
@@ -493,19 +475,33 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Failed to send to {uid}: {e}")
             fail += 1
-        
-        # Small delay to avoid rate limits
-        await asyncio.sleep(0.05)
-    
+
+        await asyncio.sleep(0.05)  # avoid rate limits
+
     await status_msg.edit_text(f"✅ Broadcast completed!\n\n📤 Sent to: {success}\n❌ Failed: {fail}")
 
-# Register handlers
+# -------------------- Application Initialization --------------------
+application = Application.builder().token(BOT_TOKEN).updater(None).build()
+
+async def setup_application():
+    """Initialize and start the application, then set webhook."""
+    await application.initialize()
+    await application.start()
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    if render_url:
+        webhook_url = f"{render_url}/webhook"
+        await application.bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook set to: {webhook_url}")
+    else:
+        logger.warning("RENDER_EXTERNAL_URL not found, webhook not set")
+
+# Register all handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("mylinks", mylinks))
 application.add_handler(CommandHandler("mystats", mystats))
-application.add_handler(CommandHandler("stats", admin_stats))  # Admin only
-application.add_handler(CommandHandler("users", admin_users))  # Admin only
-application.add_handler(CommandHandler("broadcast", broadcast))  # Admin only
+application.add_handler(CommandHandler("stats", admin_stats))
+application.add_handler(CommandHandler("users", admin_users))
+application.add_handler(CommandHandler("broadcast", broadcast))
 application.add_handler(CallbackQueryHandler(verify_callback, pattern="verify"))
 application.add_handler(MessageHandler(filters.ATTACHMENT, handle_file))
 
@@ -520,19 +516,30 @@ async def webhook():
 def index():
     return "Bot is running!"
 
+# -------------------- Main Entry --------------------
 if __name__ == "__main__":
-    # Set webhook
-    render_url = os.getenv("RENDER_EXTERNAL_URL")
-    if render_url:
-        webhook_url = f"{render_url}/webhook"
-        # Run async webhook setting
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(application.bot.set_webhook(url=webhook_url))
-        logger.info(f"Webhook set to: {webhook_url}")
-    else:
-        logger.warning("RENDER_EXTERNAL_URL not found, webhook not set")
+    # Initialize database
+    init_db()
 
-    # Start Flask server
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    # Set up the application in the same event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(setup_application())
+
+    # Run Flask in a separate thread
+    def run_flask():
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port)
+
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.start()
+    logger.info("Flask server started in background thread")
+
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    finally:
+        loop.run_until_complete(application.shutdown())
+        loop.close()
+        flask_thread.join()
