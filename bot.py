@@ -396,7 +396,6 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
         for u in all_users:
             uid = u["user_id"]
             try:
-                # Use forward_message to preserve any forward signature
                 await context.bot.forward_message(
                     chat_id=uid,
                     from_chat_id=msg.chat_id,
@@ -481,6 +480,48 @@ async def test_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Test failed")
         await update.message.reply_text(f"❌ Test failed!\n\nError: {str(e)[:200]}")
 
+async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Detect files posted directly in the storage channel and create a token link."""
+    # Only process if the channel is the configured storage channel
+    if update.channel_post.chat_id != STORAGE_CHANNEL:
+        return
+
+    msg = update.channel_post
+
+    # Check if there's an attachment
+    if not msg.effective_attachment:
+        return
+
+    # Notify admin in private chat
+    processing_msg = await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text="📤 Processing channel file..."
+    )
+
+    try:
+        # The file is already in the channel, so we can use its message_id directly.
+        stored_msg_id = msg.message_id
+        file_id, file_name, file_size = extract_message_meta(msg)
+
+        token = secrets.token_urlsafe(8)
+        link = save_file(ADMIN_ID, file_id, file_name, file_size, stored_msg_id, token)
+
+        update_user_stats(ADMIN_ID, file_size)
+
+        await processing_msg.edit_text(
+            f"✅ Channel file stored!\n\n"
+            f"📄 Name: {file_name}\n"
+            f"💾 Size: {format_size(file_size)}\n"
+            f"🔗 Link: {link}",
+            disable_web_page_preview=True
+        )
+
+        logger.info("Channel file stored with token %s", token)
+
+    except Exception as e:
+        logger.exception("Error handling channel file")
+        await processing_msg.edit_text(f"❌ Error: {str(e)[:200]}")
+
 async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     msg = update.effective_message
@@ -492,7 +533,7 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if awaiting_broadcast.get(user.id):
         return
 
-    # Only admin can upload files
+    # Only admin can upload files via private chat
     if user.id != ADMIN_ID:
         await msg.reply_text("⛔ Unauthorized.")
         return
@@ -516,7 +557,6 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stored_msg_id = copied.message_id
         file_id, file_name, file_size = extract_message_meta(msg)
 
-        # Generate a unique token for this file
         token = secrets.token_urlsafe(8)
         link = save_file(user.id, file_id, file_name, file_size, stored_msg_id, token)
 
@@ -547,9 +587,12 @@ application.add_handler(CommandHandler("mylinks", mylinks))
 application.add_handler(CommandHandler("mystats", mystats))
 application.add_handler(CommandHandler("test", test_channel))
 
-# Broadcast message handler must come before the general incoming handler
+# Channel post handler (monitors storage channel)
+application.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.ATTACHMENT, handle_channel_post))
+
+# Broadcast message handler (must come before the general incoming handler)
 application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_broadcast_message))
-# General file/upload handler
+# General file/upload handler (private chat)
 application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_incoming))
 
 # -------------------- Flask Webhook --------------------
