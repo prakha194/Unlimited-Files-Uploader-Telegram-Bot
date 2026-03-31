@@ -360,7 +360,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📢 **Broadcast mode activated.**\n\n"
         "Send me the message you want to broadcast to all users.\n"
         "It can be text, photo, video, file, or even a forwarded message.\n\n"
-        "The message will be copied to every user (preserving signatures if forwarded).\n\n"
+        "The message will be **forwarded** to every user, preserving any original sender information (if it's a forwarded message).\n\n"
         "To cancel, send /cancel_broadcast."
     )
 
