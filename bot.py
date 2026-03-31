@@ -378,9 +378,7 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
         return
 
     if awaiting_broadcast.get(user.id):
-        # Remove broadcast mode
-        awaiting_broadcast.pop(user.id, None)
-
+        del awaiting_broadcast[user.id]
         msg = update.effective_message
 
         all_users = get_all_users()
@@ -388,10 +386,7 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
             await msg.reply_text("No users to broadcast to.")
             return
 
-        status_msg = await msg.reply_text(
-            f"📤 Broadcasting to {len(all_users)} users..."
-        )
-
+        status_msg = await msg.reply_text(f"📤 Broadcasting to {len(all_users)} users...")
         success = 0
         fail = 0
 
@@ -407,7 +402,6 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
             except Exception as e:
                 logger.error(f"Failed to broadcast to {uid}: {e}")
                 fail += 1
-
             await asyncio.sleep(0.05)
 
         await status_msg.edit_text(
@@ -415,9 +409,6 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
             f"📤 Sent to: {success}\n"
             f"❌ Failed: {fail}"
         )
-
-        # STOP other handlers
-        return
 
 async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -531,9 +522,9 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not msg:
         return
 
-   # Skip if admin is in broadcast mode
-if awaiting_broadcast.get(user.id):
-    return
+    # Skip if admin is in broadcast mode
+    if awaiting_broadcast.get(user.id):
+        return
 
     # Only admin can upload files via private chat
     if user.id != ADMIN_ID:
