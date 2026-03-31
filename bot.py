@@ -537,11 +537,7 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ STORAGE_CHANNEL_ID is not configured!")
         return
 
-    # Ensure there's an attachment
-    if not msg.effective_attachment:
-        await msg.reply_text("Please send a file, photo, video, audio, or text message.")
-        return
-
+    # No early return for missing attachment – we handle text as well.
     processing_msg = await msg.reply_text("📤 Uploading to storage...")
 
     try:
