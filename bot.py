@@ -1,6 +1,6 @@
-
 import os
 import logging
+import asyncio
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -21,7 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Get environment variables (Render will inject these)
+# Get environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 STORAGE_CHANNEL = int(os.getenv("STORAGE_CHANNEL_ID"))
@@ -34,7 +34,6 @@ app = Flask(__name__)
 DB_PATH = "users.db"
 
 def init_db():
-    """Create users table if not exists."""
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -45,7 +44,6 @@ def init_db():
         conn.commit()
 
 def add_user(user_id):
-    """Add user to DB if not already present."""
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
             "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
@@ -54,7 +52,6 @@ def add_user(user_id):
         conn.commit()
 
 def set_user_joined(user_id):
-    """Mark user as verified."""
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
             "UPDATE users SET joined = 1 WHERE user_id = ?",
@@ -63,7 +60,6 @@ def set_user_joined(user_id):
         conn.commit()
 
 def is_user_joined(user_id):
-    """Check if user has verified membership."""
     with closing(sqlite3.connect(DB_PATH)) as conn:
         cursor = conn.execute(
             "SELECT joined FROM users WHERE user_id = ?",
@@ -73,20 +69,17 @@ def is_user_joined(user_id):
         return row is not None and row[0] == 1
 
 def get_all_users():
-    """Return all user IDs."""
     with closing(sqlite3.connect(DB_PATH)) as conn:
         cursor = conn.execute("SELECT user_id FROM users")
         return [row[0] for row in cursor.fetchall()]
 
-# Initialize database
 init_db()
 
-# Create PTB application
-application = Application.builder().token(BOT_TOKEN).build()
+# Create Application WITHOUT an Updater (for webhooks)
+application = Application.builder().token(BOT_TOKEN).updater(None).build()
 
 # -------------------- Helper Functions --------------------
 async def is_member(user_id):
-    """Check if user has joined the required channel."""
     try:
         chat = await application.bot.get_chat(REQUIRED_CHANNEL)
         member = await application.bot.get_chat_member(chat.id, user_id)
@@ -100,7 +93,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     add_user(user_id)
 
-    if db.is_user_joined(user_id):
+    if is_user_joined(user_id):
         await update.message.reply_text(
             "✅ **You are already verified!**\n\n"
             "📤 **Send me any file** (up to 2GB) and I'll give you a permanent download link.\n\n"
@@ -148,7 +141,7 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
+
     if not is_user_joined(user_id):
         if await is_member(user_id):
             set_user_joined(user_id)
@@ -199,7 +192,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await processing_msg.edit_text("❌ Failed to store file. Please try again later.")
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command: send a message to all users."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ You are not authorized to use this command.")
         return
@@ -210,39 +202,39 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     broadcast_msg = update.message.reply_to_message
     users = get_all_users()
-    
+
     if not users:
         await update.message.reply_text("No users in database.")
         return
 
     success = 0
     fail = 0
-    
+
     for uid in users:
         try:
             if broadcast_msg.text:
                 await context.bot.send_message(chat_id=uid, text=broadcast_msg.text)
             elif broadcast_msg.photo:
                 await context.bot.send_photo(
-                    chat_id=uid, 
-                    photo=broadcast_msg.photo[-1].file_id, 
+                    chat_id=uid,
+                    photo=broadcast_msg.photo[-1].file_id,
                     caption=broadcast_msg.caption
                 )
             elif broadcast_msg.video:
                 await context.bot.send_video(
-                    chat_id=uid, 
-                    video=broadcast_msg.video.file_id, 
+                    chat_id=uid,
+                    video=broadcast_msg.video.file_id,
                     caption=broadcast_msg.caption
                 )
             elif broadcast_msg.document:
                 await context.bot.send_document(
-                    chat_id=uid, 
-                    document=broadcast_msg.document.file_id, 
+                    chat_id=uid,
+                    document=broadcast_msg.document.file_id,
                     caption=broadcast_msg.caption
                 )
             else:
                 await context.bot.send_message(
-                    chat_id=uid, 
+                    chat_id=uid,
                     text="[Admin broadcast - unsupported media type]"
                 )
             success += 1
@@ -261,7 +253,6 @@ application.add_handler(CommandHandler("broadcast", broadcast))
 # -------------------- Flask Webhook --------------------
 @app.route("/webhook", methods=["POST"])
 async def webhook():
-    """Receive updates from Telegram."""
     update = Update.de_json(request.get_json(force=True), application.bot)
     await application.process_update(update)
     return jsonify({"ok": True})
@@ -271,15 +262,16 @@ def index():
     return "Bot is running!"
 
 if __name__ == "__main__":
-    # Set webhook
+    # Set webhook (asynchronously)
     render_url = os.getenv("RENDER_EXTERNAL_URL")
     if render_url:
         webhook_url = f"{render_url}/webhook"
-        application.bot.set_webhook(url=webhook_url)
+        # Run the async set_webhook function
+        asyncio.run(application.bot.set_webhook(url=webhook_url))
         logger.info(f"Webhook set to: {webhook_url}")
     else:
         logger.warning("RENDER_EXTERNAL_URL not found, webhook not set")
-    
+
     # Start Flask server
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
