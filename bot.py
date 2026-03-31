@@ -40,6 +40,9 @@ app = Flask(__name__)
 BOT_LOOP = None
 BOT_USERNAME = None
 
+# State for two‑step broadcast
+awaiting_broadcast = {}
+
 # -------------------- Database Functions --------------------
 def get_db_connection():
     return psycopg.connect(DATABASE_URL)
@@ -72,7 +75,7 @@ def init_db():
                     uploaded_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # Add missing columns if needed
+            # Ensure missing columns
             try:
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_sent BOOLEAN DEFAULT FALSE")
@@ -239,7 +242,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token = context.args[0]
         file_record = get_file_by_token(token)
         if file_record:
-            # Add user if not admin (or always add, but we already do)
             add_user(user_id, user.username, user.first_name)
             # Send welcome message if this is the first time for this user (and not admin)
             if user_id != ADMIN_ID and not welcome_sent(user_id):
@@ -287,7 +289,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"**Admin Commands:**\n"
             f"/stats - Bot statistics\n"
             f"/users - List all users\n"
-            f"/broadcast - Send a message to all users (reply to a message)\n"
+            f"/broadcast - Send a message to all users (2‑step)\n"
+            f"/cancel_broadcast - Cancel broadcast\n"
             f"/mylinks - Your recent files\n"
             f"/mystats - Your personal stats\n"
             f"/test - Test channel connection",
@@ -301,7 +304,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"**Admin Commands:**\n"
             f"/stats - Bot statistics\n"
             f"/users - List all users\n"
-            f"/broadcast - Send a message to all users (reply to a message)\n"
+            f"/broadcast - Send a message to all users (2‑step)\n"
+            f"/cancel_broadcast - Cancel broadcast\n"
             f"/mylinks - Your recent files\n"
             f"/mystats - Your personal stats\n"
             f"/test - Test channel connection"
@@ -346,41 +350,65 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, disable_web_page_preview=True)
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    user = update.effective_user
+    if user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Unauthorized.")
         return
 
-    # Must be a reply to a message
-    if not update.message.reply_to_message:
-        await update.message.reply_text("❌ Please reply to a message with /broadcast to send it to all users.")
+    awaiting_broadcast[user.id] = True
+    await update.message.reply_text(
+        "📢 **Broadcast mode activated.**\n\n"
+        "Send me the message you want to broadcast to all users.\n"
+        "It can be text, photo, video, file, or even a forwarded message.\n\n"
+        "The message will be copied to every user (preserving signatures if forwarded).\n\n"
+        "To cancel, send /cancel_broadcast."
+    )
+
+async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Unauthorized.")
         return
 
-    broadcast_msg = update.message.reply_to_message
-    all_users = get_all_users()
-    if not all_users:
-        await update.message.reply_text("No users to broadcast to.")
+    if awaiting_broadcast.pop(user.id, None):
+        await update.message.reply_text("❌ Broadcast cancelled.")
+    else:
+        await update.message.reply_text("No active broadcast to cancel.")
+
+async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
         return
 
-    status_msg = await update.message.reply_text(f"📤 Broadcasting to {len(all_users)} users...")
+    if awaiting_broadcast.get(user.id):
+        del awaiting_broadcast[user.id]
+        msg = update.effective_message
 
-    success = 0
-    fail = 0
-    for u in all_users:
-        uid = u["user_id"]
-        try:
-            # Copy the exact message (with forward metadata if any)
-            await broadcast_msg.copy(
-                chat_id=uid,
-                caption=broadcast_msg.caption,
-                reply_markup=broadcast_msg.reply_markup
-            )
-            success += 1
-        except Exception as e:
-            logger.error(f"Failed to broadcast to {uid}: {e}")
-            fail += 1
-        await asyncio.sleep(0.05)  # rate limit
+        all_users = get_all_users()
+        if not all_users:
+            await msg.reply_text("No users to broadcast to.")
+            return
 
-    await status_msg.edit_text(f"✅ Broadcast completed!\n\n📤 Sent to: {success}\n❌ Failed: {fail}")
+        status_msg = await msg.reply_text(f"📤 Broadcasting to {len(all_users)} users...")
+        success = 0
+        fail = 0
+
+        for u in all_users:
+            uid = u["user_id"]
+            try:
+                # Copy the message exactly (preserves forward signatures)
+                await msg.copy(chat_id=uid)
+                success += 1
+            except Exception as e:
+                logger.error(f"Failed to broadcast to {uid}: {e}")
+                fail += 1
+            await asyncio.sleep(0.05)
+
+        await status_msg.edit_text(
+            f"✅ Broadcast completed!\n\n"
+            f"📤 Sent to: {success}\n"
+            f"❌ Failed: {fail}"
+        )
 
 async def mylinks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -456,6 +484,10 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not msg:
         return
 
+    # Skip if admin is in broadcast mode (let the broadcast handler handle it)
+    if awaiting_broadcast.get(user.id):
+        return
+
     # Only admin can upload files
     if user.id != ADMIN_ID:
         await msg.reply_text("⛔ Unauthorized.")
@@ -506,10 +538,14 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("stats", stats))
 application.add_handler(CommandHandler("users", users))
 application.add_handler(CommandHandler("broadcast", broadcast))
+application.add_handler(CommandHandler("cancel_broadcast", cancel_broadcast))
 application.add_handler(CommandHandler("mylinks", mylinks))
 application.add_handler(CommandHandler("mystats", mystats))
 application.add_handler(CommandHandler("test", test_channel))
 
+# Broadcast message handler must come before the general incoming handler
+application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_broadcast_message))
+# General file/upload handler
 application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_incoming))
 
 # -------------------- Flask Webhook --------------------
