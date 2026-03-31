@@ -126,11 +126,12 @@ telegram-storage-bot/
 ├── README.md          # Documentation
 └── .env               # Environment variables (not committed)
 
-
+env.example-
+```env
 BOT_TOKEN=your_bot_token_here
 ADMIN_ID=123456789
 STORAGE_CHANNEL_ID=-1001234567890
 REQUIRED_CHANNEL=@yourchannel
 DATABASE_URL=postgresql://user:pass@host:port/dbname
-
+```
 
